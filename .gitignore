@@ -1,0 +1,48 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environment
+env/
+venv/
+ENV/
+.venv/
+venv.bak/
+.env/
+
+# Distribution and packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+MANIFEST
+
+# IDE and editor directories
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# Log files
+*.log
+
+# Environment variables
+.env
+.env.*
+*.env
+
+# Docker files
+docker-compose.override.yml
+Dockerfile.dev
+Dockerfile.local
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+weights/
+*.pth

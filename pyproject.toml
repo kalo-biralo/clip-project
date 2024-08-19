@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "clip"
+version = "0.1.0"
+description = ""
+authors = ["Prashjeev Rai <prashjeevrai@gmail.com>"]
+readme = "README.md"
+packages = [{include = "clip", from = "src"}, {include = "preprocess", from = "src/clip"}, {include = "model", from = "src/clip"}, {include = "functions", from = "src/clip"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+torch = {version = "^2.4.0+cpu", source = "pytorch_cpu"}
+torchvision = {version = "^0.19.0+cpu", source = "pytorch_cpu"}
+transformers = "^4.44.0"
+streamlit = "^1.37.1"
+pre-commit = "^3.8.0"
+
+
+[[tool.poetry.source]]
+name = "pytorch_cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
