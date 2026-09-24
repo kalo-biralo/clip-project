@@ -1,84 +1,112 @@
-# CLIP: Contrastive Language–Image Pre-Training
+# CLIP-style image–text retrieval
 
-## Overview
+A compact, CPU-friendly implementation of the CLIP idea: embed images and text into one shared space with a contrastive objective, then use cosine similarity for zero-shot matching and retrieval. It includes the model, retrieval helpers, tests and a Streamlit demo.
 
-CLIP (Contrastive Language–Image Pre-Training) is a powerful machine learning model developed to connect vision (images) and language (text) in a unified embedding space. By learning from large-scale image–text pairs, CLIP enables zero-shot image classification, image-to-text and text-to-image retrieval, and other cross-modal tasks without task-specific training.
+> **Status.** The model code, retrieval functions and demo are here. The trained checkpoint and the training script are **not** part of this repository, so the demo needs a checkpoint supplied by you (see [Weights](#weights)).
 
-This project provides an implementation of CLIP, including model architecture, preprocessing, and similarity-based retrieval functions. It is designed for researchers and practitioners interested in multimodal learning, information retrieval, and AI applications that bridge vision and language.
-
-## What Does CLIP Do?
-
-CLIP learns to associate images and their corresponding textual descriptions by jointly training an image encoder and a text encoder. The model is trained using a contrastive loss, encouraging matching image–text pairs to have similar embeddings, while non-matching pairs are pushed apart. This enables:
-
-- **Zero-shot classification**: Classify images using natural language prompts without additional training.
-- **Image–text retrieval**: Find the most relevant images for a given text query, or vice versa.
-- **Multimodal search**: Search and organize data using both visual and textual information.
-
-## Project Structure
+## How it works
 
 ```
-src/
-  clip/
-    main.py            # Main entry point
-    functions/
-      retrievers.py    # Retrieval and similarity functions
-      similarity.py    # Similarity computation
-    model/
-      clip.py          # CLIP model architecture
-    preprocess/
-      preprocess.py    # Preprocessing utilities
-    weights/
-      best_checkpoint.pth  # Model weights
-tests/                 # Unit tests
-Dockerfile             # For containerized deployment
-pyproject.toml         # Poetry configuration
-poetry.lock            # Dependency lock file
+image ──► ResNet-50 (frozen) ──► projection head ─┐
+                                                   ├─► 768-d unit vectors ─► cosine similarity
+text  ──► DistilBERT  (frozen) ──► projection head ─┘
 ```
 
-## Getting Started
+- **Backbones are pretrained and frozen.** ResNet-50 (ImageNet weights) encodes images and DistilBERT (`distilbert-base-uncased`, `[CLS]` token) encodes text. This is a deliberate trade-off: only the two projection heads are trained (about 3.3M trainable parameters against 89.9M frozen), which is far cheaper than training both encoders from scratch.
+- **Projection heads** are `Linear → GELU → Linear → Dropout`, with a residual connection from the first linear layer and a final `LayerNorm`, mapping both modalities to 768 dimensions.
+- **Loss** is the symmetric contrastive (InfoNCE) loss over a batch of matching pairs, with a learnable temperature initialised to `log(1/0.07)` and clamped to a scale of at most 100, as in the original paper.
 
-### Prerequisites
+See `CLIP.forward` in [`src/clip/model/clip.py`](src/clip/model/clip.py).
 
-- Python 3.8+
-- [Poetry](https://python-poetry.org/) for dependency management
-- PyTorch (for model training/inference)
+## What you can do with it
 
-### Installation
+| Function | Input | Output |
+| --- | --- | --- |
+| `similarity(model, image, text)` | one image, one text | cosine similarity |
+| `retrieve_text(model, image, texts, top_k)` | one image, many candidate texts | best-matching texts (zero-shot classification is this with class names as prompts) |
+| `retrieve_image(model, images, text, top_k)` | many images, one text | best-matching images (text-to-image search) |
 
-1. Clone the repository:
-   ```powershell
-   git clone <repo-url>
-   cd clip
-   ```
-2. Install dependencies:
-   ```powershell
-   poetry install
-   ```
+## Project layout
 
-### Running the Model
+```
+src/clip/
+  main.py              Streamlit demo
+  model/clip.py        ImageEncoder, TextEncoder, ProjectionHead, CLIP
+  functions/           similarity and retrieval helpers
+  preprocess/          image preprocessing (resize to 224x224, ImageNet normalisation)
+tests/                 offline unit tests (no weights or downloads needed)
+Dockerfile             container for the demo
+```
 
-You can run the main script or use the provided modules for your own experiments. Example usage:
+## Getting started
+
+Requires Python 3.10–3.12 and [Poetry](https://python-poetry.org/).
+
+```bash
+poetry install
+```
+
+On Linux and Windows (x86-64) this installs the CPU-only PyTorch build; on macOS and ARM machines it uses the regular PyPI wheels, which are already CPU-only.
+
+### Weights
+
+The model needs a checkpoint containing a `model_state_dict` for the projection heads and temperature. The path is resolved in this order:
+
+1. the `checkpoint_path` argument to `CLIP(...)` or `CLIP.load_weights(...)`
+2. the `CLIP_CHECKPOINT` environment variable
+3. `weights/best_checkpoint.pth` relative to the working directory
+
+Checkpoints are loaded with `torch.load(..., weights_only=True)`. The ResNet-50 and DistilBERT backbones are downloaded automatically on first use.
+
+### Python API
 
 ```python
-from clip.model.clip import CLIP
-from clip.functions.retrievers import retrieve_similar_images
+import torch
+from PIL import Image
 
-# Initialize model
-model = CLIP.load_from_checkpoint('src/clip/weights/best_checkpoint.pth')
+from clip.functions import retrieve_text
+from clip.model import CLIP
 
-# Retrieve similar images for a text query
-results = retrieve_similar_images(model, "a photo of a dog", image_dataset)
+model = CLIP(device=torch.device("cpu"), pretrained=True)
+
+image = Image.open("dog.jpg").convert("RGB")
+scores, indices = retrieve_text(
+    model, image, ["a photo of a dog", "a photo of a cat", "a photo of a car"], top_k=2
+)
 ```
 
-## Features
+### Demo app
 
-- CLIP model architecture and weights
-- Preprocessing for images and text
-- Similarity and retrieval functions
-- Easy-to-use API for inference
-- Docker support for deployment
+```bash
+poetry run streamlit run src/clip/main.py
+```
+
+### Docker
+
+```bash
+docker build -t clip-demo .
+docker run -p 8501:8501 -v "$(pwd)/weights:/app/weights" clip-demo
+```
+
+Then open http://localhost:8501. Weights are mounted rather than baked into the image.
+
+## Development
+
+```bash
+poetry run pytest              # unit tests (offline)
+poetry run black src tests     # formatting
+poetry run pre-commit install  # optional git hooks
+```
+
+CI runs formatting and tests on every push and pull request.
+
+## Not yet included
+
+- The training script and the dataset it used
+- Evaluation results (for example Recall@K on a held-out set)
+- A published checkpoint
 
 ## References
 
-- [CLIP: Connecting Vision and Language](https://openai.com/research/clip)
-- [Original Paper (Radford et al., 2021)](https://arxiv.org/abs/2103.00020)
+- Radford et al., [Learning Transferable Visual Models From Natural Language Supervision](https://arxiv.org/abs/2103.00020) (2021)
+- [OpenAI: CLIP — Connecting Text and Images](https://openai.com/research/clip)

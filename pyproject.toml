@@ -1,18 +1,30 @@
 [tool.poetry]
 name = "clip"
 version = "0.1.0"
-description = ""
+description = "CLIP-style image-text retrieval: frozen ResNet-50 and DistilBERT backbones with trainable projection heads, plus a Streamlit demo."
 authors = ["Prashjeev Rai <prashjeevrai@gmail.com>"]
 readme = "README.md"
-packages = [{include = "clip", from = "src"}, {include = "preprocess", from = "src/clip"}, {include = "model", from = "src/clip"}, {include = "functions", from = "src/clip"}]
+packages = [{include = "clip", from = "src"}]
 
 [tool.poetry.dependencies]
-python = "^3.10"
-torch = {version = "^2.4.0+cpu", source = "pytorch_cpu"}
-torchvision = {version = "^0.19.0+cpu", source = "pytorch_cpu"}
+python = ">=3.10,<3.13"
+# CPU-only wheels are published as "+cpu" builds for x86-64 Linux/Windows only.
+# On macOS and ARM (Apple silicon, Graviton) the plain PyPI wheels are already CPU-only.
+torch = [
+    { version = "^2.4.0+cpu", source = "pytorch_cpu", markers = "sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')" },
+    { version = "~2.4.0", markers = "sys_platform == 'darwin' or platform_machine == 'aarch64' or platform_machine == 'arm64'" },
+]
+torchvision = [
+    { version = "^0.19.0+cpu", source = "pytorch_cpu", markers = "sys_platform != 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')" },
+    { version = "~0.19.0", markers = "sys_platform == 'darwin' or platform_machine == 'aarch64' or platform_machine == 'arm64'" },
+]
 transformers = "^4.44.0"
 streamlit = "^1.37.1"
+
+[tool.poetry.group.dev.dependencies]
 pre-commit = "^3.8.0"
+pytest = "^8.3.0"
+black = "^24.8.0"
 
 
 [[tool.poetry.source]]
@@ -23,3 +35,6 @@ priority = "explicit"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

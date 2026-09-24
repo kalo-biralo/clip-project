@@ -1,55 +1,47 @@
-from preprocess import preprocess_image
 import torch
-import torch.nn as nn
+
+from ..preprocess import preprocess_image
+
+
+def _top_k(scores, top_k):
+    """Return (scores, indices) of the best matches, clamping k to what is available."""
+    k = max(1, min(top_k, scores.numel()))
+    values, indices = torch.topk(scores, k=k)
+    return values, indices
 
 
 def retrieve_text(model, image, texts, top_k=5):
-    preprocessed_image = preprocess_image(image)
-    preprocessed_image = preprocessed_image.unsqueeze(0).to(model.device)
+    """
+    Rank candidate `texts` against a single PIL `image`.
+
+    Returns (scores, indices): cosine similarities of the top matches, sorted
+    best first, and their positions in `texts`. `top_k` is clamped to len(texts).
+    """
+    image_tensor = preprocess_image(image).unsqueeze(0).to(model.device)
 
     model.eval()
     with torch.no_grad():
-        image_embeddings = model.image_encoder(preprocessed_image)
-        text_embeddings = model.text_encoder(texts, device=model.device)
+        image_embeddings = model.encode_image(image_tensor)  # (1, d)
+        text_embeddings = model.encode_text(texts)  # (n_texts, d)
 
-        image_embeddings = model.image_projection_head(image_embeddings)
-        text_embeddings = model.text_projection_head(text_embeddings)
-
-        image_embeddings = nn.functional.normalize(image_embeddings, dim=-1)
-        text_embeddings = nn.functional.normalize(text_embeddings, dim=-1)
-
-    logits = image_embeddings @ text_embeddings.T
-    top_matches = logits.softmax(dim=0)
-
-    # Sort and pick top 5 indices
-    _, top_k_matches = torch.topk(top_matches, k=top_k, dim=0)
-
-    return logits[top_k_matches], top_k_matches
+    scores = (image_embeddings @ text_embeddings.T).squeeze(0)  # (n_texts,)
+    return _top_k(scores, top_k)
 
 
 def retrieve_image(model, images, text, top_k=5):
-    preprocessed_images = []
-    for image in images:
-        preprocessed_image = preprocess_image(image)
-        preprocessed_images.append(preprocessed_image)
+    """
+    Rank a list of PIL `images` against a single `text` query.
 
-    preprocessed_images = torch.stack(preprocessed_images).to(model.device)
+    Returns (scores, indices): cosine similarities of the top matches, sorted
+    best first, and their positions in `images`. `top_k` is clamped to len(images).
+    """
+    image_tensors = torch.stack([preprocess_image(image) for image in images])
+    image_tensors = image_tensors.to(model.device)
 
     model.eval()
     with torch.no_grad():
-        image_embeddings = model.image_encoder(preprocessed_images)
-        text_embeddings = model.text_encoder(text, device=model.device)
+        image_embeddings = model.encode_image(image_tensors)  # (n_images, d)
+        text_embeddings = model.encode_text(text)  # (1, d)
 
-        image_embeddings = model.image_projection_head(image_embeddings)
-        text_embeddings = model.text_projection_head(text_embeddings)
-
-        image_embeddings = nn.functional.normalize(image_embeddings, dim=-1)
-        text_embeddings = nn.functional.normalize(text_embeddings, dim=-1)
-
-    logits = image_embeddings @ text_embeddings.T
-    top_matches = logits.softmax(dim=0)
-
-    # Sort and pick top 5 indices
-    _, top_k_matches = torch.topk(top_matches, k=top_k, dim=0)
-
-    return logits[top_k_matches], top_k_matches
+    scores = (image_embeddings @ text_embeddings.T).squeeze(1)  # (n_images,)
+    return _top_k(scores, top_k)
