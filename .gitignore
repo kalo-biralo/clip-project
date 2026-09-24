@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.pyc
 
 # Virtual environment
 env/
@@ -46,3 +45,7 @@ Dockerfile.local
 
 weights/
 *.pth
+
+# Test and OS artifacts
+.pytest_cache/
+.DS_Store

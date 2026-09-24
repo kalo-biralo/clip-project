@@ -1,16 +1,21 @@
-# Use an official Python runtime as a parent image
 FROM python:3.10-slim
 
-RUN pip install poetry
+ENV POETRY_VIRTUALENVS_CREATE=false \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1
 
-# Copy the current directory contents into the container at /app
-COPY . .
+RUN pip install "poetry>=2,<3"
 
-# Install any needed packages specified in requirements.txt
-RUN poetry install
+WORKDIR /app
 
-# Expose the port streamlit runs on
+# Install dependencies first so this layer is cached until they change
+COPY pyproject.toml poetry.lock README.md ./
+COPY src ./src
+RUN poetry install --only main
+
+# Trained weights are not baked into the image; mount them at run time:
+#   docker run -p 8501:8501 -v "$(pwd)/weights:/app/weights" clip-demo
+ENV CLIP_CHECKPOINT=/app/weights/best_checkpoint.pth
+
 EXPOSE 8501
-
-# Command to run the Streamlit app
-CMD ["streamlit", "run", "main.py"]
+CMD ["streamlit", "run", "src/clip/main.py", "--server.address=0.0.0.0", "--server.port=8501"]
