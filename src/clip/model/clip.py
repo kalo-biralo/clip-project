@@ -4,7 +4,9 @@ import torchvision.models as models
 from transformers import DistilBertModel, DistilBertTokenizer
 import numpy as np
 import os
-import torchvision.transforms as T
+
+DEFAULT_CHECKPOINT = "weights/best_checkpoint.pth"
+CHECKPOINT_ENV_VAR = "CLIP_CHECKPOINT"
 
 
 class ImageEncoder(nn.Module):
@@ -80,7 +82,8 @@ class ImageEncoder(nn.Module):
         torch.Tensor
             The feature vectors for the input images of shape (batch_size, num_features).
         """
-        return self.model(x).squeeze()
+        # flatten(1) keeps the batch dimension; squeeze() would drop it for a single image
+        return self.model(x).flatten(1)
 
 
 class TextEncoder(nn.Module):
@@ -254,63 +257,89 @@ class CLIP(nn.Module):
     """
     A PyTorch module for Contrastive Language-Image Pretraining (CLIP).
 
-    This class combines an image encoder and a text encoder to jointly learn
-    image and text representations. It includes projection heads for both
-    modalities and a learnable temperature parameter to scale the logits.
+    Two frozen, pretrained backbones (ResNet-50 for images, DistilBERT for text)
+    feed two trainable projection heads that map both modalities into a shared
+    768-dimensional space. The heads are trained with a symmetric contrastive
+    (InfoNCE) loss and a learnable temperature.
 
     Attributes:
     -----------
-    image_encoder : nn.Module
-        The image encoder module to encode images into feature vectors.
-    text_encoder : nn.Module
-        The text encoder module to encode text into feature vectors.
+    image_encoder : ImageEncoder
+        Frozen ResNet-50 feature extractor.
+    text_encoder : TextEncoder
+        Frozen DistilBERT feature extractor.
     image_projection_head : ProjectionHead
-        The projection head for image embeddings.
+        Trainable projection head for image features.
     text_projection_head : ProjectionHead
-        The projection head for text embeddings.
+        Trainable projection head for text features.
     temperature : nn.Parameter
-        A learnable parameter to scale the logits.
+        Learnable log-scale for the logits (initialised to log(1 / 0.07)).
 
     Methods:
     --------
-    forward(images, texts, device):
-        Computes the contrastive loss between image and text embeddings.
+    encode_image(images):
+        L2-normalised image embeddings, shape (batch_size, 768).
+    encode_text(texts):
+        L2-normalised text embeddings, shape (batch_size, 768).
+    forward(images, texts):
+        Symmetric contrastive loss for a batch of matching image-text pairs.
+    load_weights(checkpoint_path=None):
+        Load trained projection-head weights from a checkpoint.
 
     Parameters:
     -----------
-    image_encoder : nn.Module
-        An instance of an image encoder module.
-    text_encoder : nn.Module
-        An instance of a text encoder module.
-    embed_dim : int, optional
-        The dimensionality of the projected embeddings (default is 256).
-    dropout : float, optional
-        The dropout rate for the projection heads (default is 0.1).
+    device : torch.device
+        Device the model runs on.
+    pretrained : bool
+        If True, load trained weights via `load_weights` (see there for how the
+        checkpoint path is resolved). The ResNet and DistilBERT backbones are
+        always initialised from their public pretrained weights.
+    checkpoint_path : str, optional
+        Explicit checkpoint path, used when `pretrained` is True.
     """
 
-    def __init__(self, device, pretrained):
-        super(CLIP, self).__init__()
+    EMBED_DIM = 768
+    DROPOUT = 0.2
+    MAX_LOGIT_SCALE = 100.0
 
-        embed_dim = 768
-        dropout = 0.2
+    def __init__(self, device, pretrained, checkpoint_path=None):
+        super().__init__()
 
         self.device = device
-        self.image_encoder = ImageEncoder(model_name="resnet50").to(device)
-        self.text_encoder = TextEncoder().to(device)
+        self.image_encoder = ImageEncoder(model_name="resnet50")
+        self.text_encoder = TextEncoder()
 
         # Projection heads for image and text embeddings
         self.image_projection_head = ProjectionHead(
-            self.image_encoder.num_features, embed_dim, dropout
+            self.image_encoder.num_features, self.EMBED_DIM, self.DROPOUT
         )
         self.text_projection_head = ProjectionHead(
-            self.text_encoder.model.config.hidden_size, embed_dim, dropout
+            self.text_encoder.model.config.hidden_size, self.EMBED_DIM, self.DROPOUT
         )
 
         # Learnable temperature parameter for scaling the logits
         self.temperature = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
+        # Move *every* submodule (including the projection heads) to the device
+        self.to(device)
+
         if pretrained:
-            self.load_weights()
+            self.load_weights(checkpoint_path)
+
+    def encode_image(self, images):
+        """Return L2-normalised image embeddings of shape (batch_size, 768)."""
+        embeddings = self.image_projection_head(self.image_encoder(images))
+        return nn.functional.normalize(embeddings, dim=-1)
+
+    def encode_text(self, texts):
+        """Return L2-normalised text embeddings of shape (batch_size, 768).
+
+        `texts` is a string or a list of strings.
+        """
+        embeddings = self.text_projection_head(
+            self.text_encoder(texts, device=self.device)
+        )
+        return nn.functional.normalize(embeddings, dim=-1)
 
     def forward(self, images, texts):
         """
@@ -321,52 +350,45 @@ class CLIP(nn.Module):
         images : torch.Tensor
             The input images of shape (batch_size, n_channels, height, width).
         texts : list of str
-            The input text sequences.
-        device : torch.device
-            The device (CPU or GPU) on which to perform computations.
+            The matching text sequences, one per image.
 
         Returns:
         --------
         torch.Tensor
-            The contrastive loss between image and text embeddings.
+            The symmetric contrastive loss for the batch.
         """
-        # Encode images and texts
-        image_embeddings = self.image_encoder(images)
-        text_embeddings = self.text_encoder(texts, device=self.device)
+        image_embeddings = self.encode_image(images)
+        text_embeddings = self.encode_text(texts)
 
-        # Apply projection heads to the embeddings
-        image_embeddings = self.image_projection_head(image_embeddings)
-        text_embeddings = self.text_projection_head(text_embeddings)
+        # Scaled pairwise cosine similarities. The scale is clamped (as in the
+        # original CLIP) so the temperature cannot grow without bound.
+        logit_scale = self.temperature.exp().clamp(max=self.MAX_LOGIT_SCALE)
+        logits = (image_embeddings @ text_embeddings.transpose(-2, -1)) * logit_scale
 
-        # Normalize the embeddings
-        image_embeddings = nn.functional.normalize(image_embeddings, dim=-1)
-        text_embeddings = nn.functional.normalize(text_embeddings, dim=-1)
+        # Matching pairs sit on the diagonal
+        labels = torch.arange(logits.shape[0], device=self.device)
 
-        # Compute scaled pairwise cosine similarities
-        logits = (image_embeddings @ text_embeddings.transpose(-2, -1)) * torch.exp(
-            self.temperature
-        )
-
-        # Create labels for the symmetric loss function
-        labels = torch.arange(logits.shape[0]).to(self.device)  # shape: (batch_size,)
-
-        # Compute symmetric loss
         loss_i = nn.functional.cross_entropy(logits.transpose(-2, -1), labels)
         loss_t = nn.functional.cross_entropy(logits, labels)
-        loss = (loss_i + loss_t) / 2
+        return (loss_i + loss_t) / 2
 
-        return loss
+    def load_weights(self, checkpoint_path=None):
+        """
+        Load trained weights from a checkpoint containing a `model_state_dict`.
 
-    def load_weights(self):
-        checkpoint_path = "./weights/best_checkpoint.pth"
-        if os.path.isfile(checkpoint_path):
-            print(f"Loading checkpoint '{checkpoint_path}'")
-            if torch.cuda.is_available():
-                checkpoint = torch.load(checkpoint_path)
-            else:
-                checkpoint = torch.load(
-                    checkpoint_path, map_location=torch.device("cpu")
-                )
-            self.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            raise FileNotFoundError(f"No checkpoint found at '{checkpoint_path}'")
+        The path is resolved in this order: the `checkpoint_path` argument, the
+        CLIP_CHECKPOINT environment variable, then `weights/best_checkpoint.pth`
+        relative to the current working directory.
+        """
+        path = (
+            checkpoint_path or os.environ.get(CHECKPOINT_ENV_VAR) or DEFAULT_CHECKPOINT
+        )
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"No checkpoint found at '{path}'. Pass checkpoint_path, set "
+                f"{CHECKPOINT_ENV_VAR}, or place the file at {DEFAULT_CHECKPOINT}."
+            )
+        print(f"Loading checkpoint '{path}'")
+        # weights_only=True refuses to unpickle arbitrary objects from the file
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        self.load_state_dict(checkpoint["model_state_dict"])
